@@ -1,0 +1,46 @@
+{
+  "name": "Studio iA · Publicar en redes",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "studio-publicar",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook Studio",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "studio-publicar"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Payload del Studio: { event, networks, post: { id, caption, images:[{url,title,text}], isCarousel, links } }\n// Cabecera X-Studio-Signature = HMAC-SHA256(body, N8N_WEBHOOK_SECRET) en hex. Verifícala aquí si lo necesitas.\nconst body = $json.body ?? $json;\nif (body.event === 'ping') return [{ json: { results: [] } }];\n\nconst results = [];\nfor (const network of body.networks) {\n  // TODO: reemplaza por los nodos de cada red (LinkedIn, TikTok, X…) o llama a sub-workflows.\n  // Devuelve ok/externalId/permalink/error por red.\n  results.push({ network, ok: true, externalId: `n8n-${network}-${Date.now()}` });\n}\nreturn [{ json: { results } }];"
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Publicar por red",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Responder resultados",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [520, 0]
+    }
+  ],
+  "connections": {
+    "Webhook Studio": { "main": [[{ "node": "Publicar por red", "type": "main", "index": 0 }]] },
+    "Publicar por red": { "main": [[{ "node": "Responder resultados", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}

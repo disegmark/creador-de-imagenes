@@ -1,0 +1,31 @@
+{
+  "name": "Studio iA · Publicar programados (cada 5 min)",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] } },
+      "id": "b1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Cada 5 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://studio.tudominio.com/api/studio/cron",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "Bearer REEMPLAZA_CON_CRON_SECRET" }] },
+        "options": {}
+      },
+      "id": "b1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Llamar cron del Studio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0]
+    }
+  ],
+  "connections": {
+    "Cada 5 minutos": { "main": [[{ "node": "Llamar cron del Studio", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}
