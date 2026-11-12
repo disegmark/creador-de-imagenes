@@ -1,24 +1,26 @@
 import { createHmac } from "node:crypto";
-import { studioConfig } from "../config";
+import { n8nFor, type Workspace } from "../workspaces";
 import type { Network, Post, PublishResult } from "../types";
 
-export function n8nSignature(body: string) {
-  return studioConfig.n8nSecret ? createHmac("sha256", studioConfig.n8nSecret).update(body).digest("hex") : "";
+export function n8nSignature(body: string, secret: string) {
+  return secret ? createHmac("sha256", secret).update(body).digest("hex") : "";
 }
 
-export async function postToN8n(url: string, payload: unknown) {
+export async function postToN8n(url: string, secret: string, payload: unknown) {
   const body = JSON.stringify(payload);
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Studio-Signature": n8nSignature(body) },
+    headers: { "Content-Type": "application/json", "X-Studio-Signature": n8nSignature(body, secret) },
     body,
+    signal: AbortSignal.timeout(120_000),
   });
   const json = (await res.json().catch(() => null)) as unknown;
   return { ok: res.ok, status: res.status, json };
 }
 
-export function postPayload(post: Post, base: string) {
+export function postPayload(ws: Workspace, post: Post, base: string) {
   return {
+    workspace: ws.id,
     id: post.id,
     caption: post.caption,
     format: post.format,
@@ -36,34 +38,45 @@ export function postPayload(post: Post, base: string) {
 }
 
 /**
- * Publica vía n8n. El workflow recibe { event: "publish", networks, post } y puede:
+ * Publica vía n8n. El workflow recibe { event: "publish", networks, post } y debe:
  *  - responder en el mismo request: { results: [{ network, ok, externalId?, permalink?, error? }] }
- *  - o responder 200 y luego llamar a POST /api/studio/posts/:id/results con los resultados.
+ *  - o responder 2xx y luego llamar a POST links.results con los resultados.
+ * Una red sin resultado queda "pendiente de confirmación", NUNCA como publicada.
  */
-export async function publishViaN8n(post: Post, networks: Network[], base: string): Promise<Array<Omit<PublishResult, "at">>> {
-  if (!studioConfig.n8nPublishUrl) {
-    return networks.map((network) => ({ network, route: "n8n" as const, ok: false, error: "N8N_PUBLISH_WEBHOOK_URL no configurada" }));
+export async function publishViaN8n(ws: Workspace, post: Post, networks: Network[], base: string): Promise<Array<Omit<PublishResult, "at">>> {
+  const { publishUrl, secret } = n8nFor(ws);
+  if (!publishUrl) {
+    return networks.map((network) => ({ network, route: "n8n" as const, ok: false, error: "Webhook de n8n no configurado" }));
   }
   try {
-    const { ok, status, json } = await postToN8n(studioConfig.n8nPublishUrl, { event: "publish", networks, post: postPayload(post, base) });
+    const { ok, status, json } = await postToN8n(publishUrl, secret, { event: "publish", networks, post: postPayload(ws, post, base) });
     if (!ok) return networks.map((network) => ({ network, route: "n8n" as const, ok: false, error: `n8n respondió ${status}` }));
     const results = (json as { results?: Array<Partial<PublishResult>> } | null)?.results;
     return networks.map((network) => {
-      const r = results?.find((x) => x.network === network);
-      return r
-        ? { network, route: "n8n" as const, ok: Boolean(r.ok), externalId: r.externalId, permalink: r.permalink, error: r.error }
-        : { network, route: "n8n" as const, ok: true, externalId: "enviado-a-n8n" };
+      const r = Array.isArray(results) ? results.find((x) => x?.network === network) : undefined;
+      if (!r) return { network, route: "n8n" as const, ok: false, pending: true };
+      return {
+        network,
+        route: "n8n" as const,
+        ok: r.ok === true,
+        pending: r.ok !== true && r.pending === true ? true : undefined,
+        externalId: typeof r.externalId === "string" ? r.externalId : undefined,
+        permalink: typeof r.permalink === "string" ? r.permalink : undefined,
+        error: typeof r.error === "string" ? r.error : undefined,
+      };
     });
   } catch (error) {
-    return networks.map((network) => ({ network, route: "n8n" as const, ok: false, error: (error as Error).message }));
+    // Error de red / timeout: no sabemos si n8n llegó a publicar → pendiente, no se reenvía solo.
+    return networks.map((network) => ({ network, route: "n8n" as const, ok: false, pending: true, error: `Sin respuesta de n8n: ${(error as Error).message}` }));
   }
 }
 
 /** Avisa a n8n de que hay un post esperando aprobación (para mandarlo por WhatsApp, email, Slack…). */
-export async function notifyApprovalNeeded(post: Post, base: string) {
-  if (!studioConfig.n8nApprovalUrl) return;
+export async function notifyApprovalNeeded(ws: Workspace, post: Post, base: string) {
+  const { approvalUrl, secret } = n8nFor(ws);
+  if (!approvalUrl) return;
   try {
-    await postToN8n(studioConfig.n8nApprovalUrl, { event: "approval_requested", post: postPayload(post, base) });
+    await postToN8n(approvalUrl, secret, { event: "approval_requested", post: postPayload(ws, post, base) });
   } catch (error) {
     console.error("[studio] approval notification failed", error);
   }

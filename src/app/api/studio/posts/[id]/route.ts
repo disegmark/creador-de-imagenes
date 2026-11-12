@@ -1,30 +1,34 @@
-import { isAuthorized, notConfigured, unauthorized } from "@/lib/studio/auth";
-import { isStudioEnabled } from "@/lib/studio/config";
+import { authorize, notConfigured, unauthorized } from "@/lib/studio/auth";
 import { deletePost, getPost, updatePost } from "@/lib/studio/repo";
 import { inputErrorResponse, readJson } from "@/lib/studio/service";
 import { isNetwork, type Post } from "@/lib/studio/types";
+import { isStudioEnabled } from "@/lib/studio/workspaces";
 
 export const runtime = "nodejs";
 
 type Ctx = { params: Promise<{ id: string }> };
+const LOCKED: Post["status"][] = ["publishing", "sent", "published"];
 
 export async function GET(request: Request, ctx: Ctx) {
   if (!isStudioEnabled()) return notConfigured();
-  if (!(await isAuthorized(request))) return unauthorized();
-  const post = await getPost((await ctx.params).id);
+  const ws = await authorize(request);
+  if (!ws) return unauthorized();
+  const post = await getPost(ws.id, (await ctx.params).id);
   return post ? Response.json({ post }) : Response.json({ error: "not_found" }, { status: 404 });
 }
 
-/** Edita caption, redes, programación u orden de imágenes mientras no esté publicado. */
+/** Edita caption, redes, programación u orden de imágenes mientras no se haya enviado. */
 export async function PATCH(request: Request, ctx: Ctx) {
   if (!isStudioEnabled()) return notConfigured();
-  if (!(await isAuthorized(request))) return unauthorized();
+  const ws = await authorize(request);
+  if (!ws) return unauthorized();
   try {
     const body = await readJson(request);
     const { id } = await ctx.params;
     let locked = false;
-    const post = await updatePost(id, (p) => {
-      if (p.status === "publishing" || p.status === "published") {
+    const post = await updatePost(ws.id, id, (p) => {
+      locked = false; // la función puede repetirse si hubo un cambio simultáneo
+      if (LOCKED.includes(p.status)) {
         locked = true;
         return null;
       }
@@ -52,7 +56,12 @@ export async function PATCH(request: Request, ctx: Ctx) {
 
 export async function DELETE(request: Request, ctx: Ctx) {
   if (!isStudioEnabled()) return notConfigured();
-  if (!(await isAuthorized(request))) return unauthorized();
-  const ok = await deletePost((await ctx.params).id);
-  return ok ? Response.json({ ok }) : Response.json({ error: "not_found" }, { status: 404 });
+  const ws = await authorize(request);
+  if (!ws) return unauthorized();
+  try {
+    const ok = await deletePost(ws.id, (await ctx.params).id);
+    return ok ? Response.json({ ok }) : Response.json({ error: "not_found" }, { status: 404 });
+  } catch (error) {
+    return inputErrorResponse(error);
+  }
 }

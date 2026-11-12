@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { connection } from "next/server";
 import { StudioApp } from "@/components/studio/StudioApp";
 import { StudioLogin } from "@/components/studio/StudioLogin";
-import { hasSession } from "@/lib/studio/auth";
-import { isStudioEnabled } from "@/lib/studio/config";
+import { sessionWorkspace } from "@/lib/studio/auth";
+import { isStudioEnabled } from "@/lib/studio/workspaces";
 
 export const metadata: Metadata = {
   title: "Studio",
@@ -20,16 +20,17 @@ export default async function StudioPage({ searchParams }: { searchParams: Promi
       <div className="mx-auto max-w-lg px-6 py-24 text-center">
         <h1 className="font-display text-xl font-semibold">Studio no configurado</h1>
         <p className="mt-3 text-sm text-muted">
-          Define <code>STUDIO_PASSWORD</code> y <code>STUDIO_SECRET</code> (mín. 32 caracteres) en las variables de entorno del servidor. Ver{" "}
+          Define <code>STUDIO_SECRET</code> (mín. 32 caracteres) y al menos un espacio en <code>STUDIO_WORKSPACES</code> en las variables de entorno del servidor. Ver{" "}
           <code>docs/studio.md</code>.
         </p>
       </div>
     );
   }
 
-  if (!(await hasSession())) return <StudioLogin />;
-
   const params = await searchParams;
+  const ws = await sessionWorkspace();
+  if (!ws) return <StudioLogin ssoError={params.sso === "invalido"} />;
+
   const one = (k: string) => (typeof params[k] === "string" ? (params[k] as string) : null);
   const post = one("post");
   const callbackKey = ["connected", "error", "select"].find((k) => one(k));
@@ -37,5 +38,5 @@ export default async function StudioPage({ searchParams }: { searchParams: Promi
   const tabParam = one("tab");
   const initialTab: Tab = callback ? "conexiones" : post ? "cola" : tabParam === "cola" || tabParam === "conexiones" ? tabParam : "crear";
 
-  return <StudioApp initialTab={initialTab} focusPostId={post} callback={callback} />;
+  return <StudioApp workspaceName={ws.name} initialTab={initialTab} focusPostId={post} callback={callback} />;
 }

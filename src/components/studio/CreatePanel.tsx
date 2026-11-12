@@ -48,6 +48,9 @@ export function CreatePanel({ onPublished }: { onPublished: (post: ClientPost) =
   const [slideCount, setSlideCount] = useState(5);
   const [brand, setBrand] = useState("");
   const [slides, setSlides] = useState<SlideDraft[]>([]);
+  // Lámina → imagen generada, y láminas que fallaron (para reintentar solo esas).
+  const [slideMedia, setSlideMedia] = useState<Record<number, string>>({});
+  const [failedSlides, setFailedSlides] = useState<number[]>([]);
 
   // Resultado
   const [media, setMedia] = useState<MediaItem[]>([]);
@@ -86,28 +89,51 @@ export function CreatePanel({ onPublished }: { onPublished: (post: ClientPost) =
     );
     if (!result) return;
     setSlides(result.plan.slides);
+    setSlideMedia({});
+    setFailedSlides([]);
     if (!style) setStyle(result.plan.style);
     const tags = result.plan.hashtags.map((t) => (t.startsWith("#") ? t : `#${t}`)).join(" ");
     setCaption([result.plan.caption, tags].filter(Boolean).join("\n\n"));
   }
 
-  async function generate() {
+  type GenerateResponse = { media: Array<MediaItem & { slideIndex: number }>; failed: Array<{ index: number; title?: string; error: string }> };
+
+  async function generate(onlyIndexes?: number[]) {
+    const targets = onlyIndexes ?? slides.map((_, i) => i);
     const payload =
       mode === "carousel"
-        ? { slides: slides.map((s) => ({ prompt: s.imagePrompt, title: s.title, text: s.text })), style, format, quality }
+        ? { slides: targets.map((i) => ({ index: i, prompt: slides[i].imagePrompt, title: slides[i].title, text: slides[i].text })), style, format, quality }
         : { prompt, n: count, style, format, quality };
 
     const result = await run("generate", () => {
-      if (references.length === 0) return api<{ media: MediaItem[] }>("/api/studio/generate", { method: "POST", json: payload });
+      if (references.length === 0) return api<GenerateResponse>("/api/studio/generate", { method: "POST", json: payload });
       const form = new FormData();
       form.append("payload", JSON.stringify(payload));
       references.forEach((f) => form.append("references", f));
-      return api<{ media: MediaItem[] }>("/api/studio/generate", { method: "POST", body: form });
+      return api<GenerateResponse>("/api/studio/generate", { method: "POST", body: form });
     });
     if (!result) return;
     setMedia((prev) => [...result.media, ...prev]);
-    // En carrusel se seleccionan todas en orden; en imagen suelta, la primera.
-    setSelected((prev) => (mode === "carousel" ? result.media.map((m) => m.id) : [result.media[0]?.id, ...prev].filter(Boolean).slice(0, 10)));
+    if (mode === "carousel") {
+      // El carrusel sigue el orden de las láminas, aunque se regeneren por partes.
+      const map = { ...(onlyIndexes ? slideMedia : {}) };
+      for (const m of result.media) map[m.slideIndex] = m.id;
+      setSlideMedia(map);
+      setSelected(
+        Object.keys(map)
+          .map(Number)
+          .sort((a, b) => a - b)
+          .map((i) => map[i]),
+      );
+      setFailedSlides(result.failed.map((f) => f.index));
+      if (result.failed.length) {
+        setError(
+          `No se pudieron generar ${result.failed.length} lámina(s): ${result.failed.map((f) => `${f.index + 1}${f.title ? ` (${f.title})` : ""}`).join(", ")}. Las demás se guardaron; puedes reintentar solo las que faltan.`,
+        );
+      }
+    } else {
+      setSelected((prev) => [result.media[0]?.id, ...prev].filter(Boolean).slice(0, 10));
+    }
   }
 
   function toggle(id: string) {
@@ -167,6 +193,7 @@ export function CreatePanel({ onPublished }: { onPublished: (post: ClientPost) =
     const failed = post.results.filter((r) => !r.ok);
     if (post.status === "pending_approval") setSuccess("Enviado a aprobación. Lo verás en la cola “Por aprobar”.");
     else if (post.status === "approved") setSuccess("Programado. Se publicará automáticamente a la hora indicada.");
+    else if (post.status === "sent") setSuccess("Entregado. Falta la confirmación de n8n o de Instagram; el estado se actualizará solo en la cola.");
     else if (failed.length) setError(`Algunas redes fallaron: ${failed.map((f) => `${f.network} (${f.error})`).join(", ")}`);
     else setSuccess("¡Publicado!");
     onPublished(post);
@@ -256,7 +283,11 @@ export function CreatePanel({ onPublished }: { onPublished: (post: ClientPost) =
                         />
                         <button
                           type="button"
-                          onClick={() => setSlides((prev) => prev.filter((_, j) => j !== i))}
+                          onClick={() => {
+                            setSlides((prev) => prev.filter((_, j) => j !== i));
+                            setSlideMedia({});
+                            setFailedSlides([]);
+                          }}
                           className="focus-ring rounded p-1 text-muted hover:text-sign-signal"
                           aria-label={`Quitar lámina ${i + 1}`}
                         >
@@ -331,10 +362,15 @@ export function CreatePanel({ onPublished }: { onPublished: (post: ClientPost) =
               />
             </Field>
           </div>
+          {mode === "carousel" && failedSlides.length > 0 ? (
+            <Btn className="mt-4 w-full" onClick={() => generate(failedSlides)} disabled={busy !== null}>
+              Reintentar {failedSlides.length} lámina(s) que fallaron
+            </Btn>
+          ) : null}
           <Btn
             variant="primary"
             className="mt-4 w-full"
-            onClick={generate}
+            onClick={() => generate()}
             disabled={busy !== null || (mode === "single" ? !prompt.trim() : slides.length === 0 || slides.some((s) => !s.imagePrompt.trim()))}
           >
             {busy === "generate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}

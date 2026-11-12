@@ -1,24 +1,25 @@
-import { isAuthorized, notConfigured, unauthorized } from "@/lib/studio/auth";
-import { isStudioEnabled } from "@/lib/studio/config";
-import { carouselOpenUrl } from "@/lib/studio/handoff";
+import { authorize, notConfigured, unauthorized } from "@/lib/studio/auth";
 import { listPosts } from "@/lib/studio/repo";
 import { createPostFromInput, inputErrorResponse, readJson } from "@/lib/studio/service";
 import type { PostStatus } from "@/lib/studio/types";
+import { isStudioEnabled } from "@/lib/studio/workspaces";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 export async function GET(request: Request) {
   if (!isStudioEnabled()) return notConfigured();
-  if (!(await isAuthorized(request))) return unauthorized();
+  const ws = await authorize(request);
+  if (!ws) return unauthorized();
   const status = new URL(request.url).searchParams.get("status") as PostStatus | null;
-  const posts = (await listPosts()).filter((p) => !status || p.status === status);
-  return Response.json({ posts: posts.map((p) => ({ ...p, carouselUrl: carouselOpenUrl(p, request) })) });
+  const posts = (await listPosts(ws.id)).filter((p) => !status || p.status === status);
+  // Sin enlaces firmados en el listado: el de Carrusel Studio se pide aparte, por post.
+  return Response.json({ posts: posts.map((p) => ({ ...p, igPending: undefined })) });
 }
 
 /**
- * Crea una publicación. Lo usa el panel del Studio y también, con
- * Authorization: Bearer STUDIO_API_KEY, Carrusel Studio, n8n o el Dashboard 360.
+ * Crea una publicación en el espacio de la sesión o de la clave de API
+ * (Carrusel Studio, n8n o el Dashboard).
  *
  * { caption, media: [{url|dataUrl, title?, text?}], networks: ["instagram",...],
  *   mode: "approval" | "direct", scheduledAt?: ISO, format?: "4:5", draft?: boolean,
@@ -26,11 +27,12 @@ export async function GET(request: Request) {
  */
 export async function POST(request: Request) {
   if (!isStudioEnabled()) return notConfigured();
-  if (!(await isAuthorized(request))) return unauthorized();
+  const ws = await authorize(request);
+  if (!ws) return unauthorized();
   try {
     const body = await readJson(request);
     const source = body.source === "carrusel" ? "carrusel" : body.source === "studio" ? "studio" : "api";
-    const post = await createPostFromInput(body, request, source);
+    const post = await createPostFromInput(ws, body, request, source);
     return Response.json({ post }, { status: 201 });
   } catch (error) {
     return inputErrorResponse(error);

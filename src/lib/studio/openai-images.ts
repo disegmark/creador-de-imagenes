@@ -42,7 +42,23 @@ type OpenAIImageResponse = {
   error?: { message?: string; code?: string };
 };
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Reintenta los 429/5xx de OpenAI (hasta 2 veces, respetando Retry-After, máx. 20 s). */
 export async function generateImages(input: GenerateInput): Promise<GeneratedImage[]> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await generateOnce(input);
+    } catch (error) {
+      const e = error as ImageGenerationError & { retryAfter?: number };
+      const retryable = e instanceof ImageGenerationError && (e.status === 429 || e.status >= 500);
+      if (!retryable || attempt >= 2) throw error;
+      await sleep(Math.min(20_000, (e.retryAfter ?? 2 ** attempt * 3) * 1000));
+    }
+  }
+}
+
+async function generateOnce(input: GenerateInput): Promise<GeneratedImage[]> {
   if (!studioConfig.openaiKey) throw new ImageGenerationError("OPENAI_API_KEY no configurada", 503, "not_configured");
 
   const common = {
@@ -76,7 +92,10 @@ export async function generateImages(input: GenerateInput): Promise<GeneratedIma
 
   const json = (await res.json().catch(() => ({}))) as OpenAIImageResponse;
   if (!res.ok) {
-    throw new ImageGenerationError(json.error?.message ?? `OpenAI respondió ${res.status}`, res.status, json.error?.code);
+    const err = new ImageGenerationError(json.error?.message ?? `OpenAI respondió ${res.status}`, res.status, json.error?.code);
+    const retryAfter = Number(res.headers.get("retry-after"));
+    if (Number.isFinite(retryAfter) && retryAfter > 0) (err as ImageGenerationError & { retryAfter?: number }).retryAfter = retryAfter;
+    throw err;
   }
   return (json.data ?? [])
     .filter((d) => d.b64_json)

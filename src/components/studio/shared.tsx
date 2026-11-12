@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import type { MediaItem, Network, PostStatus, Post } from "@/lib/studio/types";
 
-export type ClientPost = Post & { carouselUrl?: string };
+export type ClientPost = Post;
 export type { MediaItem, Network, PostStatus };
 
 export const NETWORK_OPTIONS: Array<{ key: Network; label: string }> = [
@@ -20,6 +20,7 @@ export const STATUS_LABEL: Record<PostStatus, string> = {
   pending_approval: "Por aprobar",
   approved: "Aprobado",
   publishing: "Publicando…",
+  sent: "Esperando confirmación",
   published: "Publicado",
   partial: "Publicado parcial",
   failed: "Con error",
@@ -31,6 +32,7 @@ export const STATUS_STYLE: Record<PostStatus, string> = {
   pending_approval: "border-sign-amber/50 text-sign-amber",
   approved: "border-cyan/50 text-cyan",
   publishing: "border-cyan/50 text-cyan",
+  sent: "border-sign-amber/50 text-sign-amber",
   published: "border-success/50 text-success",
   partial: "border-sign-amber/50 text-sign-amber",
   failed: "border-sign-signal/50 text-sign-signal",
@@ -46,6 +48,10 @@ const ERROR_TEXT: Record<string, string> = {
   too_many_media: "Máximo 10 imágenes por publicación.",
   prompt_required: "Escribe qué imagen quieres crear.",
   rate_limited: "Demasiadas solicitudes. Espera un momento.",
+  approval_required: "Esta publicación necesita aprobación antes de publicarse.",
+  already_publishing: "Ya se está publicando. Espera unos minutos.",
+  only_drafts: "Solo los borradores se pueden editar en Carrusel Studio.",
+  conflict: "Otra acción cambió esta publicación al mismo tiempo. Actualiza e inténtalo de nuevo.",
   moderation_blocked: "El generador rechazó el prompt por sus políticas de contenido. Reformúlalo.",
 };
 

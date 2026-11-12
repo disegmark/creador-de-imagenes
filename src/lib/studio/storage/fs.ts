@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { studioConfig } from "../config";
-import type { StudioStorage } from "./types";
+import type { StudioStorage, Versioned } from "./types";
 
 const MIME_BY_EXT: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" };
 
@@ -15,8 +15,30 @@ function safeKey(key: string) {
   return key;
 }
 
+type Envelope<T> = { version: number; value: T | null };
+
+// Un solo proceso (VPS/Docker): la comprobación de versión + escritura es atómica
+// dentro de esta cola por clave.
+const locks = new Map<string, Promise<unknown>>();
+function withLock<T>(key: string, fn: () => Promise<T>) {
+  const prev = locks.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  locks.set(key, next.catch(() => undefined));
+  return next;
+}
+
+async function readEnvelope<T>(key: string): Promise<Envelope<T>> {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(root(), `${safeKey(key)}.json`), "utf8")) as unknown;
+    if (parsed && typeof parsed === "object" && "version" in parsed && "value" in parsed) return parsed as Envelope<T>;
+    return { version: 1, value: parsed as T }; // formato anterior sin versión
+  } catch {
+    return { version: 0, value: null };
+  }
+}
+
 /**
- * Almacenamiento en disco — ideal para un servidor propio (VPS, Docker, `next start`).
+ * Almacenamiento en disco — para un servidor propio (VPS, Docker, `next start`).
  * Las imágenes se sirven desde /api/studio/media/<archivo>. En Vercel el disco es
  * efímero: usa STUDIO_STORAGE=supabase.
  */
@@ -36,18 +58,20 @@ export const fsStorage: StudioStorage = {
       return null;
     }
   },
-  async getJSON<T>(key: string) {
-    try {
-      return JSON.parse(await readFile(path.join(root(), `${safeKey(key)}.json`), "utf8")) as T;
-    } catch {
-      return null;
-    }
+  async getJSON<T>(key: string): Promise<Versioned<T>> {
+    const env = await readEnvelope<T>(key);
+    return { value: env.value, version: env.version };
   },
-  async setJSON(key, value) {
-    await mkdir(root(), { recursive: true });
-    const file = path.join(root(), `${safeKey(key)}.json`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(value, null, 2));
-    await rename(tmp, file);
+  setJSONIfVersion(key, value, version) {
+    return withLock(key, async () => {
+      const current = await readEnvelope(key);
+      if (current.version !== version) return false;
+      await mkdir(root(), { recursive: true });
+      const file = path.join(root(), `${safeKey(key)}.json`);
+      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(tmp, JSON.stringify({ version: version + 1, value }, null, 2));
+      await rename(tmp, file);
+      return true;
+    });
   },
 };

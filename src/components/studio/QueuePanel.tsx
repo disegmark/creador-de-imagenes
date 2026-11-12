@@ -23,7 +23,7 @@ type Filter = "pending" | "scheduled" | "published" | "errors" | "drafts" | "all
 
 const FILTERS: Array<{ key: Filter; label: string; match: (p: ClientPost) => boolean }> = [
   { key: "pending", label: "Por aprobar", match: (p) => p.status === "pending_approval" },
-  { key: "scheduled", label: "Programados", match: (p) => p.status === "approved" || p.status === "publishing" },
+  { key: "scheduled", label: "Programados / en curso", match: (p) => p.status === "approved" || p.status === "publishing" || p.status === "sent" },
   { key: "published", label: "Publicados", match: (p) => p.status === "published" },
   { key: "errors", label: "Con error", match: (p) => p.status === "failed" || p.status === "partial" },
   { key: "drafts", label: "Borradores", match: (p) => p.status === "draft" || p.status === "rejected" },
@@ -120,6 +120,9 @@ function PostCard({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const editable = EDITABLE.includes(post.status);
+  // "Publicando" por más de 10 min = proceso cortado; se puede retomar.
+  const [now] = useState(() => Date.now());
+  const stale = post.status === "publishing" && now - new Date(post.updatedAt).getTime() > 10 * 60 * 1000;
   const dirty = caption !== post.caption || networks.join() !== post.networks.join();
 
   async function act(kind: string, fn: () => Promise<{ post?: ClientPost }>) {
@@ -179,7 +182,7 @@ function PostCard({
           <ul className="space-y-1 text-xs">
             {post.results.map((r) => (
               <li key={r.network} className="flex flex-wrap items-center gap-2">
-                <span className={r.ok ? "text-success" : "text-sign-signal"}>{r.ok ? "✓" : "✗"}</span>
+                <span className={r.ok ? "text-success" : r.pending ? "text-sign-amber" : "text-sign-signal"}>{r.ok ? "✓" : r.pending ? "…" : "✗"}</span>
                 <span className="font-medium">{networkLabel(r.network)}</span>
                 <span className="text-muted">({r.route === "n8n" ? "vía n8n" : "directo"})</span>
                 {r.permalink ? (
@@ -187,7 +190,7 @@ function PostCard({
                     Ver <ExternalLink className="h-3 w-3" />
                   </a>
                 ) : null}
-                {r.error ? <span className="text-sign-signal">{r.error}</span> : null}
+                {r.pending ? <span className="text-sign-amber">esperando confirmación{r.error ? ` · ${r.error}` : ""}</span> : r.error ? <span className="text-sign-signal">{r.error}</span> : null}
               </li>
             ))}
           </ul>
@@ -223,7 +226,7 @@ function PostCard({
             </>
           ) : null}
 
-          {["draft", "approved", "failed", "partial", "rejected"].includes(post.status) ? (
+          {["draft", "approved", "failed", "partial", "rejected"].includes(post.status) || stale ? (
             <Btn
               variant={post.status === "draft" ? "primary" : "ghost"}
               disabled={busy !== null || networks.length === 0}
@@ -235,7 +238,7 @@ function PostCard({
               }
             >
               {busy === "publish" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              {post.status === "failed" || post.status === "partial" ? "Reintentar" : "Publicar ahora"}
+              {post.status === "failed" || post.status === "partial" || stale ? "Reintentar" : "Publicar ahora"}
             </Btn>
           ) : null}
 
@@ -245,15 +248,31 @@ function PostCard({
             </Btn>
           ) : null}
 
-          {post.carouselUrl && editable ? (
-            <a href={post.carouselUrl} target="_blank" rel="noreferrer" className="focus-ring inline-flex items-center gap-1.5 rounded-xl border border-border px-3.5 py-2 text-sm hover:border-cyan/50 hover:text-cyan">
+          {post.status === "draft" ? (
+            <Btn
+              disabled={busy !== null}
+              onClick={() => {
+                // Enlace nuevo (24 h) pedido en el momento: no se guarda en la lista.
+                const tab = window.open("about:blank", "_blank");
+                setBusy("carousel");
+                api<{ openUrl: string }>(`/api/studio/posts/${post.id}/carousel`, { method: "POST" })
+                  .then(({ openUrl }) => {
+                    if (tab) tab.location.href = openUrl;
+                  })
+                  .catch((e: Error) => {
+                    tab?.close();
+                    setError(e.message);
+                  })
+                  .finally(() => setBusy(null));
+              }}
+            >
               <Layers className="h-4 w-4" /> Carrusel Studio
-            </a>
+            </Btn>
           ) : null}
 
           <Btn
             className="ml-auto px-2.5"
-            disabled={busy !== null || post.status === "publishing"}
+            disabled={busy !== null || (post.status === "publishing" && !stale)}
             aria-label="Eliminar"
             onClick={() => {
               if (!window.confirm("¿Eliminar esta publicación de la cola? (No borra lo ya publicado en redes)")) return;

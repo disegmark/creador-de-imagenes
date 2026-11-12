@@ -1,15 +1,20 @@
 
 /** Lectura centralizada de variables de entorno del Studio (solo servidor). */
 export const studioConfig = {
-  password: process.env.STUDIO_PASSWORD ?? "",
   secret: process.env.STUDIO_SECRET ?? "",
-  apiKey: process.env.STUDIO_API_KEY ?? "",
+  // Id con el que el Dashboard firma el pase de entrada automática ({ app } dentro del pase).
+  ssoApp: process.env.STUDIO_SSO_APP || "creador-imagenes",
+  // "lax" sirve si el Dashboard y esta app comparten dominio (*.ia.nom.pe); "none" para embeber desde otro dominio.
+  cookieSameSite: (process.env.STUDIO_COOKIE_SAMESITE === "none" ? "none" : "lax") as "lax" | "none",
   cronSecret: process.env.CRON_SECRET ?? "",
   publicUrl: (process.env.STUDIO_PUBLIC_URL ?? "").replace(/\/$/, ""),
 
   openaiKey: process.env.OPENAI_API_KEY ?? "",
   openaiImageModel: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1.5",
   openaiBaseUrl: (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, ""),
+
+  // Imágenes generadas a la vez por petición (el resto espera turno).
+  imageConcurrency: Math.max(1, Math.min(10, Number(process.env.STUDIO_IMAGE_CONCURRENCY) || 3)),
 
   anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
 
@@ -33,10 +38,6 @@ export const studioConfig = {
 
   carruselUrl: (process.env.NEXT_PUBLIC_CARRUSEL_URL || "https://carruseles.ia.nom.pe").replace(/\/$/, ""),
 };
-
-export function isStudioEnabled() {
-  return studioConfig.password.length > 0 && studioConfig.secret.length >= 32;
-}
 
 /** Base pública absoluta: env STUDIO_PUBLIC_URL o el origen de la petición. */
 export function publicBase(request?: Request) {

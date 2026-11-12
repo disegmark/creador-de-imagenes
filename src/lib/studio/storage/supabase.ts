@@ -1,5 +1,5 @@
 import { studioConfig } from "../config";
-import type { StudioStorage } from "./types";
+import type { StudioStorage, Versioned } from "./types";
 
 function headers(extra: Record<string, string> = {}) {
   return {
@@ -9,9 +9,12 @@ function headers(extra: Record<string, string> = {}) {
   };
 }
 
+const rest = (query: string) => `${studioConfig.supabaseUrl}/rest/v1/studio_kv${query}`;
+
 /**
  * Supabase: imágenes en Storage (bucket público) y documentos en la tabla
- * `studio_kv` (ver supabase/studio.sql). Funciona en Vercel/serverless.
+ * `studio_kv` (ver supabase/studio.sql). La columna `version` hace que dos
+ * instancias serverless no se pisen: cada escritura exige la versión leída.
  */
 export const supabaseStorage: StudioStorage = {
   async putMedia(key, data, contentType) {
@@ -24,21 +27,30 @@ export const supabaseStorage: StudioStorage = {
     if (!res.ok) throw new Error(`supabase_upload_${res.status}: ${await res.text()}`);
     return { key, url: `${supabaseUrl}/storage/v1/object/public/${supabaseBucket}/${key}` };
   },
-  async getJSON<T>(key: string) {
-    const res = await fetch(
-      `${studioConfig.supabaseUrl}/rest/v1/studio_kv?key=eq.${encodeURIComponent(key)}&select=value`,
-      { headers: headers(), cache: "no-store" },
-    );
+  async getJSON<T>(key: string): Promise<Versioned<T>> {
+    const res = await fetch(rest(`?key=eq.${encodeURIComponent(key)}&select=value,version`), { headers: headers(), cache: "no-store" });
     if (!res.ok) throw new Error(`supabase_read_${res.status}: ${await res.text()}`);
-    const rows = (await res.json()) as Array<{ value: T }>;
-    return rows[0]?.value ?? null;
+    const rows = (await res.json()) as Array<{ value: T; version: number }>;
+    return rows[0] ? { value: rows[0].value, version: Number(rows[0].version) } : { value: null, version: 0 };
   },
-  async setJSON(key, value) {
-    const res = await fetch(`${studioConfig.supabaseUrl}/rest/v1/studio_kv`, {
-      method: "POST",
-      headers: headers({ "Content-Type": "application/json", Prefer: "resolution=merge-duplicates" }),
-      body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }),
+  async setJSONIfVersion(key, value, version) {
+    const updated_at = new Date().toISOString();
+    if (version === 0) {
+      // Primera escritura: insertar; si otro ya insertó, no hace nada (devuelve 0 filas).
+      const res = await fetch(rest(""), {
+        method: "POST",
+        headers: headers({ "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates,return=representation" }),
+        body: JSON.stringify({ key, value, version: 1, updated_at }),
+      });
+      if (!res.ok) throw new Error(`supabase_write_${res.status}: ${await res.text()}`);
+      return ((await res.json()) as unknown[]).length === 1;
+    }
+    const res = await fetch(rest(`?key=eq.${encodeURIComponent(key)}&version=eq.${version}`), {
+      method: "PATCH",
+      headers: headers({ "Content-Type": "application/json", Prefer: "return=representation" }),
+      body: JSON.stringify({ value, version: version + 1, updated_at }),
     });
     if (!res.ok) throw new Error(`supabase_write_${res.status}: ${await res.text()}`);
+    return ((await res.json()) as unknown[]).length === 1;
   },
 };

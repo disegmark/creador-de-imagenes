@@ -16,7 +16,7 @@ const TABS: Array<{ key: Tab; label: string; icon: typeof Sparkles }> = [
   { key: "conexiones", label: "Conexiones", icon: Plug },
 ];
 
-export function StudioApp({ initialTab, focusPostId, callback }: { initialTab: Tab; focusPostId: string | null; callback: string | null }) {
+export function StudioApp({ workspaceName, initialTab, focusPostId, callback }: { workspaceName: string; initialTab: Tab; focusPostId: string | null; callback: string | null }) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>(initialTab);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -31,7 +31,9 @@ export function StudioApp({ initialTab, focusPostId, callback }: { initialTab: T
       <header className="mb-5 flex flex-wrap items-center gap-3">
         <h1 className="font-display text-lg font-semibold">
           Studio <span className="text-cyan">iA</span>
-          <span className="ml-2 text-xs font-normal text-muted">imágenes · carruseles · redes</span>
+          <span className="ml-2 rounded-full border border-border px-2 py-0.5 text-[11px] font-normal text-muted" title="Espacio de trabajo">
+            {workspaceName}
+          </span>
         </h1>
         <nav className="flex flex-wrap gap-1.5 sm:ml-6" aria-label="Secciones">
           {TABS.map(({ key, label, icon: Ico }) => (

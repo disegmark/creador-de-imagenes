@@ -1,11 +1,12 @@
-import { isStudioEnabled, publicBase } from "@/lib/studio/config";
+import { publicBase } from "@/lib/studio/config";
 import { corsHeaders, verifyHandoff } from "@/lib/studio/handoff";
-import { getPost, getSettings, saveMedia, updatePost } from "@/lib/studio/repo";
-import { afterStatusChange } from "@/lib/studio/service";
-import { isNetwork, type MediaItem } from "@/lib/studio/types";
+import { getPost, updatePost } from "@/lib/studio/repo";
+import { afterStatusChange, inputErrorResponse, parseMedia } from "@/lib/studio/service";
+import { isNetwork } from "@/lib/studio/types";
+import { getWorkspace, isStudioEnabled } from "@/lib/studio/workspaces";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 120;
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -13,17 +14,25 @@ export async function OPTIONS(request: Request) {
   return new Response(null, { status: 204, headers: corsHeaders(request) });
 }
 
+function resolve(request: Request, id: string) {
+  if (!isStudioEnabled()) return null;
+  return getWorkspace(verifyHandoff(id, new URL(request.url).searchParams));
+}
+
 /**
- * Carrusel Studio lee aquí las imágenes generadas:
- * GET /api/studio/handoff/:id?sig=...  →  { format, caption, slides: [{ url, title, text }], returnUrl }
+ * Carrusel Studio lee aquí las imágenes generadas (enlace firmado, caduca en 24 h):
+ * GET /api/studio/handoff/:id?w=&exp=&sig=  →  { format, caption, slides: [{ url, title, text }], returnUrl, expiresAt }
+ * Solo funciona mientras el post sea un borrador enviado a Carrusel Studio.
  */
 export async function GET(request: Request, ctx: Ctx) {
-  const headers = corsHeaders(request);
+  const headers = { ...corsHeaders(request), "Cache-Control": "no-store" };
   const { id } = await ctx.params;
-  const sig = new URL(request.url).searchParams.get("sig");
-  if (!isStudioEnabled() || !verifyHandoff(id, sig)) return Response.json({ error: "invalid_link" }, { status: 403, headers });
-  const post = await getPost(id);
+  const ws = resolve(request, id);
+  if (!ws) return Response.json({ error: "invalid_or_expired_link" }, { status: 403, headers });
+  const post = await getPost(ws.id, id);
   if (!post) return Response.json({ error: "not_found" }, { status: 404, headers });
+  if (post.status !== "draft") return Response.json({ error: "already_sent" }, { status: 409, headers });
+  const url = new URL(request.url);
   return Response.json(
     {
       id: post.id,
@@ -31,7 +40,8 @@ export async function GET(request: Request, ctx: Ctx) {
       caption: post.caption,
       networks: post.networks,
       slides: post.media.map((m) => ({ url: m.url, title: m.title ?? "", text: m.text ?? "" })),
-      returnUrl: `${publicBase(request)}/api/studio/handoff/${post.id}?sig=${sig}`,
+      returnUrl: `${publicBase(request)}${url.pathname}${url.search}`,
+      expiresAt: new Date(Number(url.searchParams.get("exp"))).toISOString(),
     },
     { headers },
   );
@@ -39,50 +49,51 @@ export async function GET(request: Request, ctx: Ctx) {
 
 /**
  * Carrusel Studio devuelve las láminas finales (con texto ya compuesto):
- * POST { slides: [{ dataUrl | url }], caption?, networks?, mode?: "approval"|"direct"|"draft", scheduledAt? }
+ * POST { slides: [{ dataUrl | url }], caption?, networks?, mode?: "approval" | "draft" }
+ *
+ * Este enlace NUNCA publica: como mucho deja el post "por aprobar". Publicar
+ * se decide en el panel (o con la clave de API del espacio). Funciona una sola
+ * vez: al enviarlo, el post deja de ser borrador y el enlace queda inservible.
  */
 export async function POST(request: Request, ctx: Ctx) {
   const headers = corsHeaders(request);
   const { id } = await ctx.params;
-  const sig = new URL(request.url).searchParams.get("sig");
-  if (!isStudioEnabled() || !verifyHandoff(id, sig)) return Response.json({ error: "invalid_link" }, { status: 403, headers });
+  const ws = resolve(request, id);
+  if (!ws) return Response.json({ error: "invalid_or_expired_link" }, { status: 403, headers });
 
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-  const slides = Array.isArray(body?.slides) ? (body!.slides as Array<Record<string, unknown>>).slice(0, 10) : [];
-  if (slides.length === 0) return Response.json({ error: "slides_required" }, { status: 422, headers });
+  try {
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    const slides = Array.isArray(body?.slides) ? body!.slides : [];
+    if (slides.length === 0) return Response.json({ error: "slides_required" }, { status: 422, headers });
+    const current = await getPost(ws.id, id);
+    if (!current) return Response.json({ error: "not_found" }, { status: 404, headers });
+    if (current.status !== "draft") return Response.json({ error: "already_sent" }, { status: 409, headers });
 
-  const base = publicBase(request);
-  const media: MediaItem[] = [];
-  for (const slide of slides) {
-    if (typeof slide?.dataUrl === "string") {
-      const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(slide.dataUrl);
-      if (!match) return Response.json({ error: "invalid_dataUrl" }, { status: 422, headers });
-      media.push(await saveMedia(Buffer.from(match[2], "base64"), match[1], base));
-    } else if (typeof slide?.url === "string" && /^https?:\/\//.test(slide.url)) {
-      media.push({ id: slide.url, url: slide.url, contentType: "image/png", createdAt: new Date().toISOString() });
-    }
+    const base = publicBase(request);
+    const media = await parseMedia(ws.id, slides, base);
+    const networks = Array.isArray(body?.networks) ? [...new Set((body!.networks as unknown[]).filter(isNetwork))] : undefined;
+    const keepDraft = body?.mode === "draft";
+
+    let accepted = false;
+    const updated = await updatePost(ws.id, id, (p) => {
+      accepted = false; // la función puede repetirse si hubo un cambio simultáneo
+      if (p.status !== "draft") return null; // otro envío llegó primero
+      accepted = true;
+      const nextNetworks = networks ?? p.networks;
+      return {
+        media,
+        source: "carrusel",
+        caption: typeof body?.caption === "string" ? body.caption.slice(0, 2200) : p.caption,
+        networks: nextNetworks,
+        mode: "approval",
+        status: keepDraft || nextNetworks.length === 0 ? "draft" : "pending_approval",
+      };
+    });
+    if (!updated || !accepted) return Response.json({ error: "already_sent" }, { status: 409, headers });
+    const post = await afterStatusChange(ws, updated, base);
+    return Response.json({ post: { id: post.id, status: post.status } }, { headers });
+  } catch (error) {
+    const res = inputErrorResponse(error);
+    return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...headers } });
   }
-  if (media.length === 0) return Response.json({ error: "slides_required" }, { status: 422, headers });
-
-  const settings = await getSettings();
-  const mode = body?.mode === "direct" || body?.mode === "approval" ? body.mode : body?.mode === "draft" ? "draft" : settings.defaultMode;
-  const networks = Array.isArray(body?.networks) ? [...new Set((body!.networks as unknown[]).filter(isNetwork))] : undefined;
-
-  const updated = await updatePost(id, (p) => {
-    if (p.status === "publishing" || p.status === "published") return null;
-    const nextNetworks = networks ?? p.networks;
-    const status = mode === "draft" || nextNetworks.length === 0 ? "draft" : mode === "approval" ? "pending_approval" : "approved";
-    return {
-      media,
-      source: "carrusel",
-      caption: typeof body?.caption === "string" ? body.caption.slice(0, 2200) : p.caption,
-      networks: nextNetworks,
-      mode: mode === "direct" ? "direct" : "approval",
-      scheduledAt: typeof body?.scheduledAt === "string" && !Number.isNaN(Date.parse(body.scheduledAt)) ? new Date(body.scheduledAt).toISOString() : p.scheduledAt,
-      status,
-    };
-  });
-  if (!updated) return Response.json({ error: "not_found_or_published" }, { status: 409, headers });
-  const post = await afterStatusChange(updated, base);
-  return Response.json({ post: { id: post.id, status: post.status, results: post.results } }, { headers });
 }

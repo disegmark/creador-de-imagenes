@@ -7,6 +7,7 @@ import { NETWORKS, type Network, type Route, type StudioSettings } from "@/lib/s
 import { api, Btn, Card, formatDate, inputClass, Notice } from "./shared";
 
 type Status = {
+  workspace: { id: string; name: string; sso: boolean };
   settings: StudioSettings;
   openai: { configured: boolean; model: string };
   planner: { configured: boolean };
@@ -14,6 +15,7 @@ type Status = {
   meta: {
     oauthAvailable: boolean;
     source: "oauth" | "env" | null;
+    error: string | null;
     pageName: string | null;
     pageId: string | null;
     igUserId: string | null;
@@ -115,7 +117,12 @@ export function ConnectionsPanel({ callback }: { callback: string | null }) {
 
   return (
     <div className="space-y-5">
+      <Notice>
+        Espacio de trabajo: <strong className="text-foreground">{status.workspace.name}</strong> ({status.workspace.id}). Las conexiones, la cola y los ajustes son solo de este espacio.
+        {status.workspace.sso ? " Entrada automática desde el Dashboard: activa." : " Entrada automática desde el Dashboard: sin configurar."}
+      </Notice>
       {message ? <Notice tone={message.tone}>{message.text}</Notice> : null}
+      {meta.error ? <Notice tone="error">{meta.error}</Notice> : null}
       {error ? <Notice tone="error">{error}</Notice> : null}
 
       {pages.length > 0 ? (
@@ -182,16 +189,16 @@ export function ConnectionsPanel({ callback }: { callback: string | null }) {
         >
           <ul className="space-y-2 text-sm">
             <li className="flex items-center gap-2">
-              <Dot ok={status.n8n.publish} /> Webhook de publicación (N8N_PUBLISH_WEBHOOK_URL)
+              <Dot ok={status.n8n.publish} /> Webhook de publicación
             </li>
             <li className="flex items-center gap-2">
-              <Dot ok={status.n8n.approval} /> Webhook de aprobaciones (N8N_APPROVAL_WEBHOOK_URL)
+              <Dot ok={status.n8n.approval} /> Webhook de aprobaciones
             </li>
             <li className="flex items-center gap-2">
-              <Dot ok={status.n8n.signed} /> Firma HMAC (N8N_WEBHOOK_SECRET)
+              <Dot ok={status.n8n.signed} /> Firma HMAC de los mensajes
             </li>
             <li className="flex items-center gap-2">
-              <Dot ok={status.api.apiKey} /> API key para callbacks (STUDIO_API_KEY)
+              <Dot ok={status.api.apiKey} /> Clave de API del espacio (api_key)
             </li>
           </ul>
         </Card>
@@ -248,7 +255,7 @@ export function ConnectionsPanel({ callback }: { callback: string | null }) {
           </ul>
         </Card>
 
-        <Card title="Integración con Carrusel Studio y Dashboard" hint="Endpoints para conectar otras apps (Bearer STUDIO_API_KEY).">
+        <Card title="Integración con Carrusel Studio y Dashboard" hint="Endpoints para otras apps, con la clave de API de este espacio (Authorization: Bearer).">
           <ul className="space-y-1.5 break-all font-mono text-[11px] text-muted">
             <li>
               <span className="text-cyan">POST</span> {base}/api/studio/posts <span className="font-sans">— crear publicación</span>

@@ -4,7 +4,7 @@ Genera imágenes con el generador de imágenes de OpenAI (el mismo motor de Chat
 
 ```bash
 npm install
-cp .env.local.example .env.local   # completa STUDIO_PASSWORD, STUDIO_SECRET, OPENAI_API_KEY…
+cp .env.local.example .env.local   # completa STUDIO_SECRET, STUDIO_WORKSPACES, OPENAI_API_KEY…
 npm run dev                         # http://localhost:3000/studio
 ```
 

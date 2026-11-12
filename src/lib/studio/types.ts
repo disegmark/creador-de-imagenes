@@ -33,8 +33,9 @@ export type MediaItem = {
  * draft            → creado, todavía en edición (o enviado a Carrusel Studio)
  * pending_approval → espera aprobación humana
  * approved         → aprobado; se publica ahora o a la hora programada
- * publishing       → en curso
- * published        → publicado en todas las redes elegidas
+ * publishing       → en curso (si se corta, se recupera solo a los 10 min)
+ * sent             → entregado (n8n o Instagram procesando); esperando confirmación
+ * published        → publicado (confirmado) en todas las redes elegidas
  * partial          → publicado en algunas redes, falló en otras
  * failed           → falló en todas
  * rejected         → rechazado en la aprobación
@@ -44,6 +45,7 @@ export type PostStatus =
   | "pending_approval"
   | "approved"
   | "publishing"
+  | "sent"
   | "published"
   | "partial"
   | "failed"
@@ -55,6 +57,8 @@ export type PublishResult = {
   network: Network;
   route: Route;
   ok: boolean;
+  /** Entregado pero sin confirmar (n8n respondió sin resultado, o Instagram sigue procesando). */
+  pending?: boolean;
   externalId?: string;
   permalink?: string;
   error?: string;
@@ -73,6 +77,8 @@ export type Post = {
   source: "studio" | "carrusel" | "api";
   results: PublishResult[];
   note?: string; // motivo de rechazo / comentario de aprobación
+  /** Contenedores de Instagram creados pero sin publicar: se reanudan en la siguiente pasada. */
+  igPending?: { creationId?: string; childIds?: string[]; createdAt: string } | null;
   createdAt: string;
   updatedAt: string;
 };

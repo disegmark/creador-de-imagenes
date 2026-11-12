@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { isAuthorized, notConfigured, unauthorized } from "@/lib/studio/auth";
-import { isStudioEnabled, studioConfig } from "@/lib/studio/config";
+import { authorize, notConfigured, unauthorized } from "@/lib/studio/auth";
+import { studioConfig } from "@/lib/studio/config";
 import { planCarousel } from "@/lib/studio/planner";
+import { isStudioEnabled } from "@/lib/studio/workspaces";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -9,7 +10,7 @@ export const maxDuration = 120;
 /** Planifica un carrusel con Claude: guion por lámina + prompts de imagen + caption. */
 export async function POST(request: Request) {
   if (!isStudioEnabled()) return notConfigured();
-  if (!(await isAuthorized(request))) return unauthorized();
+  if (!(await authorize(request))) return unauthorized();
   if (!studioConfig.anthropicKey) return Response.json({ error: "planner_not_configured" }, { status: 503 });
 
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;

@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
-import { checkPassword, createSessionValue, SESSION_COOKIE } from "@/lib/studio/auth";
-import { isStudioEnabled } from "@/lib/studio/config";
+import { SESSION_COOKIE, sessionCookieOptions, setSession, workspaceByPassword } from "@/lib/studio/auth";
+import { isStudioEnabled } from "@/lib/studio/workspaces";
 
 export const runtime = "nodejs";
 
@@ -16,27 +16,19 @@ export async function POST(request: Request) {
   }
 
   const body = (await request.json().catch(() => ({}))) as { password?: unknown };
-  if (typeof body.password !== "string" || !checkPassword(body.password)) {
+  const ws = typeof body.password === "string" ? workspaceByPassword(body.password) : null;
+  if (!ws) {
     const count = (entry && entry.until > Date.now() ? entry.count : 0) + 1;
     failures.set(ip, { count, until: Date.now() + 15 * 60 * 1000 });
     return Response.json({ error: "invalid_password" }, { status: 401 });
   }
   failures.delete(ip);
-
-  const session = createSessionValue();
-  const store = await cookies();
-  store.set(SESSION_COOKIE, session.value, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: session.maxAge,
-  });
-  return Response.json({ ok: true });
+  await setSession(ws.id);
+  return Response.json({ ok: true, workspace: ws.name });
 }
 
 export async function DELETE() {
   const store = await cookies();
-  store.delete(SESSION_COOKIE);
+  store.set(SESSION_COOKIE, "", sessionCookieOptions(0));
   return Response.json({ ok: true });
 }

@@ -3,7 +3,16 @@ import { decrypt } from "../crypto";
 import { getMetaConnection } from "../repo";
 import type { Post, PublishResult } from "../types";
 
-type GraphResponse = { id?: string; post_id?: string; status_code?: string; permalink?: string; permalink_url?: string; error?: { message?: string } };
+type GraphResponse = {
+  id?: string;
+  post_id?: string;
+  status_code?: string;
+  permalink?: string;
+  permalink_url?: string;
+  access_token?: string;
+  name?: string;
+  error?: { message?: string };
+};
 
 const graphBase = () => `https://graph.facebook.com/${studioConfig.metaGraphVersion}`;
 
@@ -18,49 +27,83 @@ async function graph(path: string, params: Record<string, string>, method: "GET"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Credenciales efectivas: conexión OAuth hecha desde el Dashboard o, si no, variables de entorno. */
-export async function resolveMetaCredentials() {
-  const conn = await getMetaConnection();
+/** Credenciales del espacio: conexión OAuth hecha desde el panel o, si no, variables de entorno (solo espacio "principal"). */
+export async function resolveMetaCredentials(ws: string) {
+  const conn = await getMetaConnection(ws);
   if (conn?.pageTokenEnc) {
-    return { source: "oauth" as const, pageId: conn.pageId, pageName: conn.pageName, token: decrypt(conn.pageTokenEnc), igUserId: conn.igUserId, igUsername: conn.igUsername };
+    let token: string;
+    try {
+      token = decrypt(conn.pageTokenEnc);
+    } catch {
+      throw new Error("La conexión de Meta guardada no se puede leer (¿cambió STUDIO_SECRET?). Vuelve a conectar en Conexiones.");
+    }
+    return { source: "oauth" as const, pageId: conn.pageId, pageName: conn.pageName, token, igUserId: conn.igUserId, igUsername: conn.igUsername };
   }
-  if (studioConfig.metaPageToken && (studioConfig.metaPageId || studioConfig.metaIgUserId)) {
+  if (ws === "principal" && studioConfig.metaPageToken && (studioConfig.metaPageId || studioConfig.metaIgUserId)) {
     return { source: "env" as const, pageId: studioConfig.metaPageId, pageName: "", token: studioConfig.metaPageToken, igUserId: studioConfig.metaIgUserId || undefined, igUsername: undefined };
   }
   return null;
 }
 
-async function waitUntilReady(containerId: string, token: string) {
-  for (let i = 0; i < 20; i += 1) {
-    const { status_code } = await graph(containerId, { fields: "status_code", access_token: token }, "GET");
-    if (status_code === "FINISHED" || !status_code) return;
-    if (status_code === "ERROR" || status_code === "EXPIRED") throw new Error(`Instagram no pudo procesar la imagen (${status_code})`);
-    await sleep(1500);
-  }
-  throw new Error("Instagram tardó demasiado en procesar las imágenes");
+/** Estado de un contenedor de Instagram: listo, en proceso o error. */
+async function containerStatus(id: string, token: string) {
+  const { status_code } = await graph(id, { fields: "status_code", access_token: token }, "GET");
+  if (status_code === "ERROR" || status_code === "EXPIRED") throw new Error(`Instagram no pudo procesar la imagen (${status_code})`);
+  return status_code === "FINISHED" || !status_code ? "ready" : "processing";
 }
 
-export async function publishInstagram(post: Post): Promise<Omit<PublishResult, "at">> {
-  const creds = await resolveMetaCredentials();
-  if (!creds?.igUserId) return { network: "instagram", route: "direct", ok: false, error: "Instagram no está conectado" };
-  const { igUserId, token } = creds;
-  const media = post.media.slice(0, 10);
+/** Espera a que todos los contenedores estén listos, sin pasar del plazo. */
+async function waitAll(ids: string[], token: string, deadline: number) {
+  let pending = [...ids];
+  while (pending.length) {
+    const states = await Promise.all(pending.map((id) => containerStatus(id, token)));
+    pending = pending.filter((_, i) => states[i] !== "ready");
+    if (!pending.length) return true;
+    if (Date.now() + 3000 > deadline) return false;
+    await sleep(3000);
+  }
+  return true;
+}
+
+export type InstagramOutcome = { result: Omit<PublishResult, "at">; igPending: Post["igPending"] };
+
+/**
+ * Publica en Instagram. Los contenedores se crean en paralelo y se espera como
+ * máximo hasta `deadline`. Si Instagram sigue procesando, se guardan los
+ * contenedores (igPending) y la publicación se completa en la siguiente pasada
+ * (cron o "Reintentar"), sin volver a subir las imágenes.
+ */
+export async function publishInstagram(ws: string, post: Post, deadline: number): Promise<InstagramOutcome> {
+  const fail = (error: string): InstagramOutcome => ({ result: { network: "instagram", route: "direct", ok: false, error }, igPending: null });
   try {
-    let creationId: string;
-    if (media.length === 1) {
-      const c = await graph(`${igUserId}/media`, { image_url: media[0].url, caption: post.caption, access_token: token });
-      creationId = c.id!;
-    } else {
-      const children: string[] = [];
-      for (const item of media) {
-        const c = await graph(`${igUserId}/media`, { image_url: item.url, is_carousel_item: "true", access_token: token });
-        children.push(c.id!);
+    const creds = await resolveMetaCredentials(ws);
+    if (!creds?.igUserId) return fail("Instagram no está conectado");
+    const { igUserId, token } = creds;
+    const media = post.media.slice(0, 10);
+
+    // Los contenedores de Instagram caducan a las 24 h.
+    const resume = post.igPending && Date.now() - new Date(post.igPending.createdAt).getTime() < 23 * 3600 * 1000 ? post.igPending : null;
+    const createdAt = resume?.createdAt ?? new Date().toISOString();
+    let creationId = resume?.creationId;
+    let childIds = resume?.childIds;
+
+    if (!creationId) {
+      if (media.length === 1) {
+        creationId = (await graph(`${igUserId}/media`, { image_url: media[0].url, caption: post.caption, access_token: token })).id!;
+      } else {
+        childIds ??= await Promise.all(
+          media.map(async (item) => (await graph(`${igUserId}/media`, { image_url: item.url, is_carousel_item: "true", access_token: token })).id!),
+        );
+        if (!(await waitAll(childIds, token, deadline))) {
+          return { result: { network: "instagram", route: "direct", ok: false, pending: true, error: "Instagram sigue procesando las imágenes" }, igPending: { childIds, createdAt } };
+        }
+        creationId = (await graph(`${igUserId}/media`, { media_type: "CAROUSEL", children: childIds.join(","), caption: post.caption, access_token: token })).id!;
       }
-      for (const child of children) await waitUntilReady(child, token);
-      const parent = await graph(`${igUserId}/media`, { media_type: "CAROUSEL", children: children.join(","), caption: post.caption, access_token: token });
-      creationId = parent.id!;
     }
-    await waitUntilReady(creationId, token);
+
+    if (!(await waitAll([creationId], token, deadline))) {
+      return { result: { network: "instagram", route: "direct", ok: false, pending: true, error: "Instagram sigue procesando la publicación" }, igPending: { creationId, childIds, createdAt } };
+    }
     const published = await graph(`${igUserId}/media_publish`, { creation_id: creationId, access_token: token });
     let permalink: string | undefined;
     try {
@@ -68,27 +111,23 @@ export async function publishInstagram(post: Post): Promise<Omit<PublishResult, 
     } catch {
       /* el permalink es opcional */
     }
-    return { network: "instagram", route: "direct", ok: true, externalId: published.id, permalink };
+    return { result: { network: "instagram", route: "direct", ok: true, externalId: published.id, permalink }, igPending: null };
   } catch (error) {
-    return { network: "instagram", route: "direct", ok: false, error: (error as Error).message };
+    return fail((error as Error).message);
   }
 }
 
-export async function publishFacebook(post: Post): Promise<Omit<PublishResult, "at">> {
-  const creds = await resolveMetaCredentials();
-  if (!creds?.pageId) return { network: "facebook", route: "direct", ok: false, error: "Página de Facebook no conectada" };
-  const { pageId, token } = creds;
+export async function publishFacebook(ws: string, post: Post): Promise<Omit<PublishResult, "at">> {
   try {
+    const creds = await resolveMetaCredentials(ws);
+    if (!creds?.pageId) return { network: "facebook", route: "direct", ok: false, error: "Página de Facebook no conectada" };
+    const { pageId, token } = creds;
     let postId: string | undefined;
     if (post.media.length === 1) {
       const r = await graph(`${pageId}/photos`, { url: post.media[0].url, caption: post.caption, access_token: token });
       postId = r.post_id ?? r.id;
     } else {
-      const ids: string[] = [];
-      for (const item of post.media) {
-        const r = await graph(`${pageId}/photos`, { url: item.url, published: "false", access_token: token });
-        ids.push(r.id!);
-      }
+      const ids = await Promise.all(post.media.map(async (item) => (await graph(`${pageId}/photos`, { url: item.url, published: "false", access_token: token })).id!));
       const r = await graph(`${pageId}/feed`, {
         message: post.caption,
         attached_media: JSON.stringify(ids.map((id) => ({ media_fbid: id }))),
@@ -108,7 +147,7 @@ export async function publishFacebook(post: Post): Promise<Omit<PublishResult, "
   }
 }
 
-// ---- OAuth desde el Dashboard ----
+// ---- OAuth desde el panel ----
 
 export const META_SCOPES = [
   "pages_show_list",
@@ -134,18 +173,14 @@ type PageAccount = { id: string; name: string; access_token: string; instagram_b
 
 /** Intercambia el code por un token de larga duración y devuelve las páginas (con su IG vinculado). */
 export async function exchangeMetaCode(code: string, redirectUri: string) {
-  const short = await graph(
-    "oauth/access_token",
-    { client_id: studioConfig.metaAppId, client_secret: studioConfig.metaAppSecret, redirect_uri: redirectUri, code },
-    "GET",
-  ) as GraphResponse & { access_token?: string };
+  const short = await graph("oauth/access_token", { client_id: studioConfig.metaAppId, client_secret: studioConfig.metaAppSecret, redirect_uri: redirectUri, code }, "GET");
   const long = await graph(
     "oauth/access_token",
     { grant_type: "fb_exchange_token", client_id: studioConfig.metaAppId, client_secret: studioConfig.metaAppSecret, fb_exchange_token: short.access_token! },
     "GET",
-  ) as GraphResponse & { access_token?: string };
+  );
   const userToken = long.access_token!;
-  const me = (await graph("me", { fields: "name", access_token: userToken }, "GET")) as GraphResponse & { name?: string };
+  const me = await graph("me", { fields: "name", access_token: userToken }, "GET");
   const res = await fetch(
     `${graphBase()}/me/accounts?${new URLSearchParams({ fields: "id,name,access_token,instagram_business_account{id,username}", access_token: userToken })}`,
     { cache: "no-store" },

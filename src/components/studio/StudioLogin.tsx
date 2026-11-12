@@ -5,11 +5,11 @@ import { useRouter } from "next/navigation";
 import { Loader2, Lock } from "lucide-react";
 import { api, Btn, inputClass, Notice } from "./shared";
 
-export function StudioLogin() {
+export function StudioLogin({ ssoError = false }: { ssoError?: boolean }) {
   const router = useRouter();
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(ssoError ? "El acceso desde el Dashboard caducó o no es válido. Vuelve a abrir la app desde el Dashboard o entra con tu contraseña." : "");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
